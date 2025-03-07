@@ -1,0 +1,37 @@
+require "p384.jinc"
+
+export fn p384_keypair_export(
+    reg u64 secret_key
+            public_key
+    ) -> reg u64
+{
+    reg u64 r;
+    r = __keygen(secret_key, public_key);
+    return r;
+}
+
+export fn p384_sign_export(
+    reg u64 signed_message
+            signed_message_length
+            message
+            message_length
+            secret_key
+    ) -> reg u64
+{
+    reg u64 r;
+    r = __p384_sign(signed_message, signed_message_length, message, message_length, secret_key);
+    return r;
+}
+
+export fn p384_open_export(
+    reg u64 message
+            message_length
+            signed_message
+            signed_message_length
+            public_key
+    ) -> reg u64
+{
+    reg u64 r;
+    r = __p384_open(message, message_length, signed_message, signed_message_length, public_key);
+    return r;
+}

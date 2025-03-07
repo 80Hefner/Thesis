@@ -1,0 +1,73 @@
+
+inline fn __aes192_assist(reg u128 temp1 temp2 temp3) -> reg u128, reg u128, reg u128
+{
+    reg u128 temp4;
+
+    temp2 = #VPSHUFD(temp2, 0x55);
+    temp4 = #VPSLLDQ(temp1, 0x4);
+    temp1 = #VPXOR_128(temp1, temp4);
+    temp4 = #VPSLLDQ(temp1, 0x4);
+    temp1 = #VPXOR_128(temp1, temp4);
+    temp4 = #VPSLLDQ(temp1, 0x4);
+    temp1 = #VPXOR_128(temp1, temp4);
+    temp1 = #VPXOR_128(temp1, temp2);
+    temp2 = #VPSHUFD(temp1, 0xff);
+    temp4 = #VPSLLDQ(temp3, 0x4);
+    temp3 = #VPXOR_128(temp3, temp4);
+    temp3 = #VPXOR_128(temp3, temp2);
+
+    return temp1, temp2, temp3;
+}
+
+inline fn __aes192_key_expansion(reg u64 user_key, stack u128[NKEYS] key_schedule) -> stack u128[NKEYS]
+{
+    reg u128 temp1, temp2, temp3, temp4;
+    inline int i;
+
+    temp1 = (u128) [user_key];
+    temp3 = (u128) [user_key + 16];
+
+    key_schedule[0] = temp1;
+    temp4 = temp3;
+    temp2 = #AESKEYGENASSIST(temp3, 0x1);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    temp4 = #VSHUFPS(temp4, temp1, 0x44);
+    key_schedule[1] = temp4;
+    temp4 = #VSHUFPS(temp1, temp3, 0x4E);
+    key_schedule[2] = temp4;
+    temp2 = #AESKEYGENASSIST(temp3, 0x2);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    key_schedule[3] = temp1;
+    temp4 = temp3;
+    temp2 = #AESKEYGENASSIST(temp3, 0x4);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    temp4 = #VSHUFPS(temp4, temp1, 0x44);
+    key_schedule[4] = temp4;
+    temp4 = #VSHUFPS(temp1, temp3, 0x4E);
+    key_schedule[5] = temp4;
+    temp2 = #AESKEYGENASSIST(temp3, 0x8);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    key_schedule[6] = temp1;
+    temp4 = temp3;
+    temp2 = #AESKEYGENASSIST(temp3, 0x10);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    temp4 = #VSHUFPS(temp4, temp1, 0x44);
+    key_schedule[7] = temp4;
+    temp4 = #VSHUFPS(temp1, temp3, 0x4E);
+    key_schedule[8] = temp4;
+    temp2 = #AESKEYGENASSIST(temp3, 0x20);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    key_schedule[9] = temp1;
+    temp4 = temp3;
+    temp2 = #AESKEYGENASSIST(temp3, 0x40);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    temp4 = #VSHUFPS(temp4, temp1, 0x44);
+    key_schedule[10] = temp4;
+    temp4 = #VSHUFPS(temp1, temp3, 0x4E);
+    key_schedule[11] = temp4;
+    temp2 = #AESKEYGENASSIST(temp3, 0x80);
+    temp1, temp2, temp3 = __aes192_assist(temp1, temp2, temp3);
+    key_schedule[12] = temp1;
+
+    return key_schedule;
+}

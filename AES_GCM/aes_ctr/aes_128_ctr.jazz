@@ -1,0 +1,21 @@
+require "../aes/aes_128_params.jinc"
+require "../aes/aes_128_keyexpand.jinc"
+require "aes_ctr.jinc"
+
+export fn aes128_ctr_encrypt_export(reg u64 in ivec nonce out len key)
+{
+    stack u128[NKEYS] keys;
+    reg u64 cipher;
+
+    keys = __aes128_key_expansion(key, keys);
+    __aes_ctr(in, ivec, nonce, out, len, keys);
+}
+
+export fn aes128_ctr_decrypt_export(reg u64 in ivec nonce out len key)
+{
+    stack u128[NKEYS] keys;
+    reg u64 cipher;
+
+    keys = __aes128_key_expansion(key, keys);
+    __aes_ctr(in, ivec, nonce, out, len, keys);
+}

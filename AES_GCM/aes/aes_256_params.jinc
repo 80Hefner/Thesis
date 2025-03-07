@@ -1,0 +1,3 @@
+
+param int ROUNDS = 14;
+param int NKEYS = 15;

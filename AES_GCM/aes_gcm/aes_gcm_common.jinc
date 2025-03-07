@@ -1,0 +1,285 @@
+require "aes_gcm_globals.jinc"
+require "../aes/aes.jinc"
+
+// Returns the 256-bit value resulting of the carry-less multiplication of a and b
+inline fn __clmul(reg u128 a b) -> reg u128, reg u128
+{
+    reg u128 tmp1, tmp2, high, low;
+
+    low = #VPCLMULQDQ(a, b, 0);  // aL * bL
+    tmp1 = #VPCLMULQDQ(a, b, 16); // aL * bH
+    tmp2 = #VPCLMULQDQ(a, b, 1);  // aH * bL
+    high = #VPCLMULQDQ(a, b, 17); // aH * bH
+
+    tmp1 = #VPXOR_128(tmp1, tmp2);
+    tmp2 = #VPSLLDQ_128(tmp1, 8);
+    tmp1 = #VPSRLDQ_128(tmp1, 8);
+    low = #VPXOR_128(low, tmp2);
+    high = #VPXOR_128(high, tmp1);
+
+    return high, low;
+}
+
+// Shifts the 256-bit value [high:low] one bit to the left
+inline fn __bit_shift_left(reg u128 high low) -> reg u128, reg u128
+{
+    reg u128 high_c, low_c, mid_c;
+
+    // MSB: Most Significant Bit  |  LSB: Least Significant Bit
+
+    // Each double-word(32-bits) of 'low' and 'high' is shifted one bit to the left.
+    // The carry of each double-word is stored in 'low_c' and 'high_c', respectively
+    low_c = #VPSRL_4u32(low, 31);
+    high_c = #VPSRL_4u32(high, 31);
+    low = #VPSLL_4u32(low, 1);
+    high = #VPSLL_4u32(high, 1);
+
+    // 'low_c' and 'high_c' double-words are shifted one position (one double-word) to the left,
+    // discarding the leftmost one, which held 'high' MSB.
+    // 'low' MSB is stored in 'mid_c'. 'high' one is discarded
+    mid_c = #VPSRLDQ_128(low_c, 12);
+    high_c = #VPSLLDQ_128(high_c, 4);
+    low_c = #VPSLLDQ_128(low_c, 4);
+
+    // Each double-word's LSB in 'low' and 'high' gets the MSB of the original double-word to the right (carry between double-words)
+    // The LSB of 'low' is zero-padded. The LSB of 'high' is the MSB of the original 'low' (held in 'mid_c')
+    low = #VPOR_128(low, low_c);
+    high = #VPOR_128(high, high_c);
+    high = #VPOR_128(high, mid_c);
+
+    return high, low;
+}
+
+// Carry-less multiplication of a and b, in GF(2¹²⁸) defined by the reduction polynomial g = g(x) = x¹²⁸ + x⁷ + x² + x + 1
+inline fn __gfmul(reg u128 a b) -> reg u128
+{
+    reg u128 tmp0, tmp1, tmp2, tmp3, tmp4, tmp5, tmp6, tmp7, tmp8, tmp9;
+
+    // [tmp6 : tmp3] -> carry-less multiplication of a and b
+    tmp6, tmp3 = __clmul(a, b);
+
+    // Reduction algorithm
+    // Shift carry-less result 1 bit to the left
+    tmp6, tmp3 = __bit_shift_left(tmp6, tmp3);
+
+    // Second phase of the reduction
+    tmp7 = #VPSLL_4u32(tmp3, 31);
+    tmp8 = #VPSLL_4u32(tmp3, 30);
+    tmp9 = #VPSLL_4u32(tmp3, 25);
+    tmp7 = #VPXOR_128(tmp7, tmp8);
+    tmp7 = #VPXOR_128(tmp7, tmp9);
+    tmp8 = #VPSRLDQ_128(tmp7, 4);
+    tmp7 = #VPSLLDQ_128(tmp7, 12);
+    tmp3 = #VPXOR_128(tmp3, tmp7);
+
+    // Third phase of the reduction
+    tmp2 = #VPSRL_4u32(tmp3, 1);
+    tmp4 = #VPSRL_4u32(tmp3, 2);
+    tmp5 = #VPSRL_4u32(tmp3, 7);
+    tmp2 = #VPXOR_128(tmp2, tmp4);
+    tmp2 = #VPXOR_128(tmp2, tmp5);
+    tmp2 = #VPXOR_128(tmp2, tmp8);
+    tmp3 = #VPXOR_128(tmp3, tmp2);
+    tmp6 = #VPXOR_128(tmp6, tmp3);
+    
+    return tmp6;
+}
+
+inline fn __store_zero(stack u8[16] arr) -> stack u8[16]
+{
+    reg u128 xmm;
+
+    xmm = #set0_128();
+    arr[u128 0] = xmm;
+
+    return arr;
+}
+
+inline fn __store(reg u128 xmm, stack u8[16] arr) -> stack u8[16]
+{
+    arr[u128 0] = xmm;
+
+    return arr;
+}
+
+inline fn __load(stack u8[16] arr, reg u128 xmm) -> reg u128
+{
+    xmm = arr[u128 0];
+
+    return xmm;
+}
+
+// Receives Xi-1, AAD/IV/C and H and outputs Xi -> (Xi-1 ⊕ Ai/IVi/Ci) · H
+inline fn __addmul(reg u128 input X H) -> reg u128
+{
+    X = #VPXOR_128(X, input);
+    X = __gfmul(X, H);
+
+    return X;
+}
+
+// Calculates the value of the hash key H
+inline fn __init_H(stack u128[NKEYS] keys) -> reg u128
+{
+    reg u128 tmp, H;
+
+    tmp = #set0_128();
+    H = __aes_rounds(tmp, keys);
+    H = #VPSHUFB_128(H, BSWAP_MASK);
+
+    return H;
+}
+
+// Processes one of GHASH's intermediate computation given an initial state that will be transformed through addmul's
+// (either for the AAD, the IV or the ciphertext)
+// These addmul's receive Xi-1, add it to AAD/IV/C and multiply it by H
+// Xi-1:     is the intermediate state (result of the last round) of the GHASH computation
+// AAD/IV/C: is either the AAD, IV or ciphertext
+// H:        is the hash key calculated by encrypting the key with a zero block
+inline fn __ghash_middlestep(reg u64 input inlen, reg u128 state H) -> reg u128
+{
+    reg u128 tmp;
+    reg u64 i;
+    stack u8[16] lbarr_s;
+
+    while (inlen > 16) {
+        tmp = (u128) [input];
+        tmp = #VPSHUFB_128(tmp, BSWAP_MASK);
+        state = __addmul(tmp, state, H);
+
+        input += 16;
+        inlen -= 16;
+    }
+
+    if (inlen > 0) {
+        i = 0;
+        lbarr_s = __store_zero(lbarr_s);
+        while(i < inlen) {
+            lbarr_s[(int) i] = (u8) [input];
+
+            input += 1;
+            i += 1;
+        }
+        tmp = __load(lbarr_s, tmp);
+        tmp = #VPSHUFB_128(tmp, BSWAP_MASK);
+        state = __addmul(tmp, state, H);
+    }
+
+    return state;
+}
+
+// Processes the last step of GHASH computation, where it concatenates the lengths of AAD and ciphertext,
+// (or simply the length of the IV), then addmul's it with Xi-1 and H
+inline fn __ghash_laststep(reg u64 len1 len2, reg u128 X H, inline int iv) -> reg u128
+{
+    reg u128 tmp;
+    reg u64 vpinsr_oprd;
+
+    vpinsr_oprd = len1;
+    vpinsr_oprd <<= 3;
+    tmp = #VPINSR_2u64(tmp, vpinsr_oprd, 0);
+    if (iv == 1) {
+        vpinsr_oprd = 0;
+    }
+    else {
+        vpinsr_oprd = len2;
+        vpinsr_oprd <<= 3;
+    }
+    tmp = #VPINSR_2u64(tmp, vpinsr_oprd, 1);
+
+    X = __addmul(tmp, X, H);
+    X = #VPSHUFB_128(X, BSWAP_MASK);
+
+    return X;
+}
+
+inline fn __process_iv(reg u64 ivec ibytes, reg u128 H, stack u128[NKEYS] keys) -> reg u128
+{
+    reg u128 tmp, Y0;
+    reg u64 vpinsr_oprd;
+    stack u64 ibytes_s;
+
+    ibytes_s = ibytes;
+
+    if (ibytes == 12) {
+        /*
+          ┌────────────────┬────────────────────────────────────────────────┐
+          │ 0x 01 00 00 00 │             initialization vector              │
+          │    (4 bytes)   │                  (12 bytes)                    │
+          └────────────────┴────────────────────────────────────────────────┘
+        */
+        // Y₀ = IV || 0^{31}1 , if len(IV) = 96
+        Y0 = (u128) [ivec];
+        vpinsr_oprd = 0x1000000;
+        Y0 = #VPINSR_4u32(Y0, vpinsr_oprd, 3);
+    }
+    else {
+        // Y₀ = GHASH(H,{},IV) , otherwise
+        Y0 = #set0_128();
+        Y0 = __ghash_middlestep(ivec, ibytes, Y0, H);
+        ibytes = ibytes_s;
+        Y0 = __ghash_laststep(ibytes, 0, Y0, H, 1);
+    }
+
+    return Y0;
+}
+
+inline fn __process_input(reg u64 input output nbytes, reg u128 X Y H, stack u128[NKEYS] keys, inline int encrypt) -> reg u128
+{
+    reg u128 tmp, ctr;
+    reg u64 i;
+    stack u8[16] lbarr_s;
+
+    // Increment Y0 to Y1
+    ctr = #VPSHUFB_128(Y, BSWAP_EPI32);
+    ctr = #VPADD_4u32(ctr, ONE);
+
+    while(nbytes >= 16) {
+        tmp = #VPSHUFB_128(ctr, BSWAP_EPI32);
+        tmp = __aes_rounds(tmp, keys);
+        tmp = #VPXOR_128(tmp, (u128) [input]);
+        (u128) [output] = tmp;
+        
+        // If we are encrypting, applies addmul to update X value
+        // Basically does the GHASH middle step for the ciphertext while it is already loaded in a registry,
+        // instead of doing it in the end
+        // In decryption we do it before calling this function
+        if (encrypt == 1) {
+            tmp = #VPSHUFB_128(tmp, BSWAP_MASK);
+            X = __addmul(tmp, X, H);
+        }
+        
+        // Increment Yi+1 to Yi+2
+        ctr = #VPADD_4u32(ctr, ONE);
+
+        nbytes -= 16;
+        input += 16;
+        output += 16;
+    }
+
+    if (nbytes > 0) {
+        tmp = #VPSHUFB_128(ctr, BSWAP_EPI32);
+        tmp = __aes_rounds(tmp, keys);
+        tmp = #VPXOR_128(tmp, (u128) [input]);
+        lbarr_s = __store(tmp, lbarr_s);
+        i = 0;
+        while(i < nbytes) {
+            (u8) [output] = lbarr_s[(int) i];
+    
+            i += 1;
+            output += 1;
+        }
+
+        if (encrypt == 1) {
+            while(i < 16) {
+                lbarr_s[(int) i] = 0;
+                i += 1;
+            }
+            tmp = __load(lbarr_s, tmp);
+            tmp = #VPSHUFB_128(tmp, BSWAP_MASK);
+            X = __addmul(tmp, X, H);
+        }
+    }
+
+    return X;
+}

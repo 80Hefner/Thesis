@@ -1,0 +1,455 @@
+from NIST_P384 require "ecc/ecc_generic.jinc"
+from NIST_P384 require "fp/fpn_generic.jinc"
+from NIST_P384 require "sha384/sha384.jinc"
+require "p384_globals.jinc"
+require "p384_params.jinc"
+
+// --- KEYGEN ---
+inline fn __generatePrivateKey(stack u64[NLIMBS] secret_key) -> reg u64, stack u64[NLIMBS]
+{
+    inline int i;
+    reg u64 c_64, lastbit;
+    stack u64 r;
+    stack u64[NLIMBS] one;
+    reg ptr u64[NLIMBS] secret_key_p, one_p;
+
+    secret_key_p = secret_key;
+    secret_key_p = #randombytes(secret_key_p);
+    secret_key = secret_key_p;
+
+    // 4. Set x = x mod (𝑛 − 1).
+    lastbit = 0;
+    secret_key_p = secret_key;
+    secret_key_p = __fpn_cminusP(lastbit, secret_key_p);
+    secret_key = secret_key_p;
+
+    // 5. Set x = x + 1.
+    one[0] = 1;
+    for i=1 to NLIMBS {
+        ?{}, c_64 = #XOR_64(c_64, c_64);
+        one[(int) i] = c_64;
+    }
+    one_p = one;
+    one_p = _fpn_toM(one_p);
+    one = one_p;
+    secret_key_p = secret_key; one_p = one;
+    secret_key_p = __fpn_add(secret_key_p, one_p);
+    secret_key = secret_key_p;
+
+    secret_key_p = secret_key;
+    secret_key_p = _fpn_fromM(secret_key_p);
+    secret_key = secret_key_p;
+
+    r = 0;
+    return r, secret_key;
+}
+
+inline fn __generatePublicKey(stack u64[NLIMBS] sk pk_ax pk_ay) -> stack u64, stack u64[NLIMBS], stack u64[NLIMBS]
+{
+    inline int i;
+    stack u64 r;
+    stack u64[NLIMBS] ecc_gx, ecc_gy, ecc_gz, ax, ay, z_inv;
+    stack u64[NLIMBS] pk_px, pk_py, pk_pz;
+    reg ptr u64[NLIMBS] pk_ax_p pk_ay_p;
+    reg ptr u64[NLIMBS] glob_pm2p sk_p;
+
+    for i=0 to NLIMBS {
+        ecc_gx[i] = ECC_GX[i];
+        ecc_gy[i] = ECC_GY[i];
+        ecc_gz[i] = ECC_GZ[i];
+    }
+
+    // 5. Q = [d]G
+    pk_px, pk_py, pk_pz = _ecc_scalar_mul(sk, pk_px, pk_py, pk_pz, ecc_gx, ecc_gy, ecc_gz);
+
+    pk_ax, pk_ay = __ecc_normalize(pk_px, pk_py, pk_pz);
+    pk_ax_p = pk_ax;
+    pk_ax_p = _fp_fromM(pk_ax_p);
+    pk_ax = pk_ax_p;
+    pk_ay_p = pk_ay;
+    pk_ay_p = _fp_fromM(pk_ay_p);
+    pk_ay = pk_ay_p;
+
+    r = 0;
+    return r, pk_ax, pk_ay;
+}
+
+inline fn __keygen(reg u64 sk pk) -> reg u64
+{
+    inline int i;
+    reg u64 r;
+    stack u64 status;
+    stack u64 sk_s, pk_s;
+    stack u64[NLIMBS] secret_key;
+    stack u64[NLIMBS] pk_x, pk_y;
+    reg ptr u64[NLIMBS] pk_x_p pk_y_p;
+
+    sk_s = sk;
+    pk_s = pk;
+
+    status, secret_key = __generatePrivateKey(secret_key);
+
+    if (status == 0) {
+        sk = sk_s;
+        for i=0 to NLIMBS {
+            (u64) [sk + i*8] = secret_key[(int) i];
+        }
+
+        status, pk_x, pk_y = __generatePublicKey(secret_key, pk_x, pk_y);
+
+        if (status == 0) {
+            pk = pk_s; pk_x_p = pk_x; pk_y_p = pk_y;
+            __store_affine_point(pk, pk_x_p, pk_y_p);
+        }
+    }
+
+    r = status;
+    return r;
+}
+
+
+inline fn __bswap_bn(stack u64[NLIMBS] bn) -> stack u64[NLIMBS]
+{
+    inline int i;
+    reg u64 r;
+
+    for i=0 to NLIMBS {
+        r = bn[i];
+        r = #BSWAP_64(r);
+        bn[i] = r;
+    }
+    r = bn[0];
+    bn[0] = bn[5];
+    bn[5] = r;
+    r = bn[1];
+    bn[1] = bn[4];
+    bn[4] = r;
+    r = bn[2];
+    bn[2] = bn[3];
+    bn[3] = r;
+
+    return bn;
+}
+
+// --- SIGN ---
+// m is a pointer to the message
+// mlen is the actual value of the message length
+// d is a stack array cointaining the secret key
+inline fn __sign_inner(reg u64 m mlen, stack u64[NLIMBS] d) -> stack u8[SIGN_LEN], stack u64
+{
+    inline int i;
+    stack u64 status;
+    stack u64[NLIMBS] hash hash_rev;
+    reg ptr u64[NLIMBS] hash_p;
+    stack u64[NLIMBS] k kinv;
+    reg ptr u64[NLIMBS] k_p kinv_p;
+    stack u8[SIGN_LEN] signature;
+    stack u64[NLIMBS] ecc_gx, ecc_gy, ecc_gz;
+    stack u64[NLIMBS] rx, ry, rz;
+    stack u64[NLIMBS] rax, ray;
+    reg ptr u64[NLIMBS] rax_p;
+    reg u64 r, lastbit;
+    stack u64[NLIMBS] s;
+    reg ptr u64[NLIMBS] d_p s_p;
+
+    // 1. Compute H = Hash(M) using the established hash function or XOF where the bit string H has hashlen bits
+    hash = __sha384_ref(m, mlen);
+    hash = __bswap_bn(hash);
+
+    // 3. Generate a per-message secret number k, 0 < 𝑘 < 𝑛, for domain parameters D following one of the procedures in Section 6.3
+    for i=0 to NLIMBS*8 {
+        k[i] = K[u64 i];
+    }
+    k_p = k;
+    k_p = _fpn_toM(k_p);
+    k = k_p;
+
+    // 4. Compute k^-1 mod n using the routine in Appendix B.1
+    kinv_p = kinv; k_p = k;
+    kinv_p = __fpn_inv(k_p, kinv_p);
+    kinv = kinv_p; k = k_p;
+
+    // 5. Compute the elliptic curve point R = [k]G
+    for i=0 to NLIMBS {
+        ecc_gx[i] = ECC_GX[i];
+        ecc_gy[i] = ECC_GY[i];
+        ecc_gz[i] = ECC_GZ[i];
+    }
+    k_p = k;
+    k_p = _fpn_fromM(k_p);
+    k = k_p;
+    rx, ry, rz = _ecc_scalar_mul(k, rx, ry, rz, ecc_gx, ecc_gy, ecc_gz);
+    rax, ray = __ecc_normalize(rx, ry, rz);
+    rax_p = rax;
+    rax_p = _fp_fromM(rax_p);
+    rax = rax_p;
+
+    // 8. Set r = 𝑟1 mod n
+    rax_p = rax;
+    rax_p = _fpn_toM(rax_p);
+    rax = rax_p;
+    lastbit = 0;
+    rax_p = rax;
+    rax_p = __fpn_cminusP(lastbit, rax_p);
+    rax = rax_p;
+
+    // 9. Compute s = 𝑘^−1 ⋅ (e + r ⋅ d) mod n
+    d_p = d;
+    d_p = _fpn_toM(d_p);
+    d = d_p;
+    d_p = d; rax_p = rax;
+    d_p = _fpn_mulU(d_p, rax_p);
+    d = d_p; rax = rax_p;
+    hash_p = hash;
+    hash_p = _fpn_toM(hash_p);
+    hash = hash_p;
+    hash_p = hash; d_p = d;
+    hash_p = __fpn_add(hash_p, d_p);
+    hash = hash_p; d = d_p;
+    s_p = s; kinv_p = kinv; hash_p = hash;
+    s_p = _fpn_mul(kinv_p, hash_p, s_p);
+    s = s_p; kinv = kinv_p; hash = hash_p;
+
+    // 10. Securely destroy k and 𝑘^−1
+    ?{}, r = #set0_64();
+    for i=0 to NLIMBS {
+        k[i] = r;
+        kinv[i] = r;
+    }
+
+    // Writing R to the output
+    rax_p = rax;
+    rax_p = _fpn_fromM(rax_p);
+    rax = rax_p;
+    rax = __bswap_bn(rax);
+    for i=0 to 6 {
+        signature[u64 i] = rax[i];
+    }
+
+    // Writing S to the output
+    s_p = s;
+    s_p = _fpn_fromM(s_p);
+    s = s_p;
+    s = __bswap_bn(s);
+    for i=6 to 12 {
+        signature[u64 i] = s[i-6];
+    }
+
+    return signature, status;
+}
+
+// sm, smlen, m and sk are all pointers to values
+// only mlen is the actual value
+inline fn __p384_sign(reg u64 sm smlen m mlen sk) -> reg u64
+{
+    stack u64 sm_s smlen_s m_s mlen_s;
+    stack u64[NLIMBS] secret_key;
+    stack u8[SIGN_LEN] signature;
+    inline int i;
+    reg u8 c_8;
+    reg u64 c_64;
+    stack u64 status;
+
+    sm_s = sm;
+    smlen_s = smlen;
+    m_s = m;
+    mlen_s = mlen;
+
+    // load secret key from memory
+    for i=0 to NLIMBS {
+        c_64 = (u64)[sk + i*8];
+        secret_key[(int) i] = c_64;
+    }
+
+    // generate signature ( R || S )
+    m = m_s;
+    mlen = mlen_s;
+    signature, status = __sign_inner(m, mlen, secret_key);
+
+    // write signed message length to smlen
+    c_64 = mlen_s;
+    c_64 += SIGN_LEN;
+    smlen = smlen_s;
+    (u64)[smlen] = c_64;
+
+    // write signature to the signed message output ( R || S )
+    sm = sm_s;
+    for i=0 to SIGN_LEN/8 {
+        c_64 = signature[u64 i];
+        (u64)[sm] = c_64;
+        sm += 8;
+    }
+
+    // write message to the signed message output ( R || S || message )
+    m = m_s;
+    mlen = mlen_s;
+    while (mlen > 0) {
+        c_8 = (u8)[m];
+        (u8)[sm] = c_8;
+        m += 1;
+        sm += 1;
+        mlen -= 1;
+    }
+
+    c_64 = status;
+    return c_64;
+}
+
+// // --- VERIFICATION ---
+inline fn __verify_inner(stack u64[NLIMBS] r s, reg u64 m mlen, stack u64[2*NLIMBS] q) -> reg u64
+{
+    inline int i;
+    reg u64 status;
+
+    stack u64[NLIMBS] hash;
+    reg ptr u64[NLIMBS] hash_p;
+
+    stack u64[NLIMBS] sinv;
+    reg ptr u64[NLIMBS] r_p s_p sinv_p;
+
+    stack u64[NLIMBS] u v;
+    reg ptr u64[NLIMBS] u_p v_p;
+
+    stack u64[NLIMBS] ecc_gx, ecc_gy, ecc_gz;
+    stack u64[NLIMBS] q_x, q_y, q_z;
+    reg ptr u64[NLIMBS] q_x_p q_y_p;
+    stack u64[NLIMBS] r1x, r1y, r1z, r2x, r2y, r2z, r1x_2, r1y_2, r1z_2;
+    stack u64[NLIMBS] r1ax, r1ay;
+    reg ptr u64[NLIMBS] r1ax_p;
+
+    // 2. Compute H = Hash(M) using the established hash function or XOF where the bit string H has hashlen bits
+    hash = __sha384_ref(m, mlen);
+    hash = __bswap_bn(hash);
+
+    // Convert r and s to Montgomery form
+    r = __bswap_bn(r);
+    r_p = r;
+    r_p = _fpn_toM(r_p);
+    r = r_p;
+    s = __bswap_bn(s);
+    s_p = s;
+    s_p = _fpn_toM(s_p);
+    s = s_p;
+
+    // 4. Compute s^-1 mod n using the routine in Appendix B.1
+    sinv_p = sinv; s_p = s;
+    sinv_p = __fpn_inv(s_p, sinv_p);
+    sinv = sinv_p; s = s_p;
+
+    // 5. Compute u = e ⋅ s^-1 mod n and v = r ⋅ s^-1 mod n^
+    hash_p = hash;
+    hash_p = _fpn_toM(hash_p);
+    hash = hash_p;
+    u_p = u; hash_p = hash; sinv_p = sinv;
+    u_p = _fpn_mul(hash_p, sinv_p, u_p);
+    u = u_p; hash = hash_p; sinv = sinv_p;
+    v_p = v; r_p = r; sinv_p = sinv;
+    v_p = _fpn_mul(r_p, sinv_p, v_p);
+    v = v_p; r = r_p; sinv = sinv_p;
+
+    // 6. Compute R1 = [u]G + [v]Q. Output “reject” if R1 is the identity element (the point at infinity).
+    for i=0 to NLIMBS {
+        ecc_gx[i] = ECC_GX[i];
+        ecc_gy[i] = ECC_GY[i];
+        ecc_gz[i] = ECC_GZ[i];
+    }
+    u_p = u;
+    u_p = _fpn_fromM(u_p);
+    u = u_p;
+    r1x, r1y, r1z = _ecc_scalar_mul(u, r1x, r1y, r1z, ecc_gx, ecc_gy, ecc_gz);
+
+    for i=0 to NLIMBS {
+        q_x[i] = q[i];
+        q_y[i] = q[i+NLIMBS];
+        q_z[i] = ECC_GZ[i];
+    }
+    v_p = v;
+    v_p = _fpn_fromM(v_p);
+    v = v_p;
+    q_x_p = q_x;
+    q_x_p = _fp_toM(q_x_p);
+    q_x = q_x_p;
+    q_y_p = q_y;
+    q_y_p = _fp_toM(q_y_p);
+    q_y = q_y_p;
+    r2x, r2y, r2z = _ecc_scalar_mul(v, r2x, r2y, r2z, q_x, q_y, q_z);
+    r1x_2, r1y_2, r1z_2 = _ecc_add(r1x, r1y, r1z, r2x, r2y, r2z, r1x_2, r1y_2, r1z_2);
+
+    r1ax, r1ay = __ecc_normalize(r1x_2, r1y_2, r1z_2);
+    r1ax_p = r1ax;
+    r1ax_p = _fp_fromM(r1ax_p);
+    r1ax = r1ax_p;
+    r_p = r;
+    r_p = _fpn_fromM(r_p);
+    r = r_p;
+
+    // 9. Verify that r = 𝑟1 mod n. Output “reject” if verification fails; output “accept” otherwise
+    r1ax_p = r1ax; r_p = r;
+    status = _bn_eq(r1ax_p, r_p);
+
+    return status;
+}
+
+
+// m, mlen, sm and pk are all pointers to values
+// only smlen is the actual value
+inline fn __p384_open(reg u64 m mlen sm smlen pk) -> reg u64
+{
+    stack u64 m_s mlen_s sm_s smlen_s;
+    stack u64[2*NLIMBS] public_key;
+    stack u64[NLIMBS] r s;
+    inline int i;
+    reg u8 c_8;
+    reg u64 c_64;
+
+    m_s = m;
+    mlen_s = mlen;
+    sm_s = sm;
+    smlen_s = smlen;
+
+    // load public key from memory
+    for i=0 to 2*NLIMBS {
+        c_64 = (u64)[pk + i*8];
+        public_key[(int) i] = c_64;
+    }
+
+    // load signature from memory
+    sm = sm_s;
+    for i=0 to NLIMBS {
+        c_64 = (u64)[sm];
+        r[(int) i] = c_64;
+        sm += 8;
+    }
+    for i=0 to NLIMBS {
+        c_64 = (u64)[sm];
+        s[(int) i] = c_64;
+        sm += 8;
+    }
+
+    // write message length to mlen
+    c_64 = smlen_s;
+    c_64 -= SIGN_LEN;
+    mlen = mlen_s;
+    (u64)[mlen] = c_64;
+
+    // copy message from sm to m
+    sm = sm_s;
+    sm += SIGN_LEN;
+    c_64 = smlen_s;
+    c_64 -= SIGN_LEN;
+    while (c_64 > 0) {
+        c_8 = (u8)[sm];
+        (u8)[m] = c_8;
+        sm += 1;
+        m += 1;
+        c_64 -= 1;
+    }
+
+    // verify signature
+    m = m_s;
+    mlen = smlen_s;
+    mlen -= SIGN_LEN;
+    c_64 = __verify_inner(r, s, m, mlen, public_key);
+
+    return c_64;
+}

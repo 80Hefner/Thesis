@@ -1,0 +1,149 @@
+require "aes_gcm_globals.jinc"
+require "aes_gcm_common.jinc"
+
+inline fn __check_authtag(reg u64 tag tbytes, reg u128 T) -> reg u64
+{
+    reg u128 tmp, mask;
+    reg u64 ret_value, cmp_value, one_r;
+    reg bool zf;
+
+    if (tbytes == 16) {
+        tmp = (u128) [tag];
+    }
+    else {
+        if (tbytes == 15) {
+            mask = TAG15_MASK;
+        }
+        else {
+            if (tbytes == 14) {
+                mask = TAG14_MASK;
+            }
+            else {
+                if (tbytes == 13) {
+                    mask = TAG13_MASK;
+                }
+                else {
+                    if (tbytes == 12) {
+                        mask = TAG12_MASK;
+                    }
+                    else {
+                        if (tbytes == 8) {
+                            mask = TAG8_MASK;
+                        }
+                        else {
+                            if (tbytes == 4) {
+                                mask = TAG4_MASK;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        T = #VPAND_128(T, mask);
+        tmp = (u128) [tag];
+        tmp = #VPAND_128(tmp, mask);
+    }
+
+    tmp = #VPCMPEQ_16u8(tmp, T);
+    cmp_value = #VPMOVMSKB_u128u64(tmp);
+    _, _, _, _, zf = #CMP_64(cmp_value, 0xFFFF);
+
+    ret_value = 0;
+    one_r = 1;
+    ret_value = one_r if zf;
+
+    return ret_value;
+}
+
+inline fn __aes_gcm_decrypt(reg u64 cipher tag ivec addt decrypted nbytes abytes ibytes tbytes, stack u128[NKEYS] keys) -> reg u64
+{
+    // Declare variables
+    reg u128 X, Y0, Y, H, T;
+    stack u128 Y0_s, H_s;
+    stack u64 cipher_s, tag_s, ivec_s, addt_s, decrypted_s;
+    stack u64 nbytes_s, abytes_s, ibytes_s, tbytes_s;
+    reg u64 authenticated;
+
+    // Store some variables in memory
+    cipher_s = cipher;
+    tag_s = tag;
+    ivec_s = ivec;
+    addt_s = addt;
+    decrypted_s = decrypted;
+    nbytes_s = nbytes;
+    abytes_s = abytes;
+    ibytes_s = ibytes;
+    tbytes_s = tbytes;
+
+    /* --------------------------------
+                H = E(K, 0¹²⁸)
+       -------------------------------- */
+    // Calculate value of the hash key H
+    H = __init_H(keys);
+
+    /* -----------------------------------------------------------
+                       IV || 0^{31}1      if len(IV) = 96
+                Y0 = {
+                       GHASH(H,{},IV)  otherwise.
+       ----------------------------------------------------------- */
+    // Process the initialization vector generating Y₀
+    ivec = ivec_s;
+    ibytes = ibytes_s;
+    Y0 = __process_iv(ivec, ibytes, H, keys); 
+    Y0_s = Y0;
+
+    /* -------------------------------------------------------------------------------------
+                        / 0                                   for i = 0
+                       /  (Xi-1 ⊕ Ai) · H                    for i = 1,...,m-1
+                      /   (Xm-1 ⊕(A*m || 0^{128-v})) · H     for i = m
+                Xi = {
+                      \   (Xi-1 ⊕ Ci) · H                    for i = m+1,...,m+n-1
+                       \  (Xm+n-1 ⊕(C*m || 0^{128-u})) · H   for i = m+n
+                        \ (Xm+n ⊕ (len(A) || len(C))) · H    for i = m+n+1
+       ------------------------------------------------------------------------------------- */
+    // Full GHASH computation
+        // GHASH first step
+    X = #set0_128();
+        // GHASH middle step 1 (Additional Auth Data)
+    addt = addt_s;
+    abytes = abytes_s;
+    X = __ghash_middlestep(addt, abytes, X, H);
+        // GHASH middle step 2 (CIphertext)
+    cipher = cipher_s;
+    nbytes = nbytes_s;
+    X = __ghash_middlestep(cipher, nbytes, X, H);
+        // GHASH last step
+    nbytes = nbytes_s;
+    abytes = abytes_s;
+    X = __ghash_laststep(nbytes, abytes, X, H, 0);
+    H_s = H;
+
+    /* ----------------------------------------------------
+                T' = MSBt(GHASH(H,A,C) ⊕ E(K,Y₀))
+       ---------------------------------------------------- */
+    // Generate authentication tag
+    Y0 = Y0_s;
+    Y = __aes_rounds(Y0, keys);  // E(K,Y₀)
+    T = #VPXOR_128(X, Y);
+    
+    // Check the authentication tag
+    tag = tag_s;
+    tbytes = tbytes_s;
+    authenticated = __check_authtag(tag, tbytes, T);
+    
+    /* -------------------------------------------------------
+                Yi  = incr(Yi-1) for i = 1,...,n
+                Pi  = Ci ⊕ E(K,Yi) for i = 1,...,n-1
+                P*n = C*n ⊕ MSBu(E(K,Yn))
+       ------------------------------------------------------- */
+    // Process the ciphertext, if it as been authenticated successfully
+    if (authenticated == 1) {
+        cipher = cipher_s;
+        decrypted = decrypted_s;
+        nbytes = nbytes_s;
+        H = H_s;
+        _ = __process_input(cipher, decrypted, nbytes, X, Y0, H, keys, 0);
+    }
+
+    return authenticated;
+}

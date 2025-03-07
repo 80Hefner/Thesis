@@ -1,0 +1,43 @@
+require "../aes/aes_256_params.jinc"
+require "../aes/aes_256_keyexpand.jinc"
+require "aes_gcm_encrypt.jinc"
+require "aes_gcm_decrypt.jinc"
+
+export fn aes256_gcm_encrypt_export(reg u64 in ivec addt out bytes key)
+{
+    stack u128[NKEYS] keys;
+    reg u64 cipher, tag;
+    reg u64 nbytes, abytes, ibytes, tbytes;
+
+    cipher = (u64) [out];
+    tag = (u64) [out + 8];
+
+    nbytes = (u64) [bytes];
+    abytes = (u64) [bytes + 8];
+    ibytes = (u64) [bytes + 16];
+    tbytes = (u64) [bytes + 24];
+
+    keys = __aes256_key_expansion(key, keys);
+    __aes_gcm_encrypt(in, ivec, addt, cipher, tag, nbytes, abytes, ibytes, tbytes, keys);
+}
+
+export fn aes256_gcm_decrypt_export(reg u64 in ivec addt out bytes key) -> reg u64
+{
+    stack u128[NKEYS] keys;
+    reg u64 cipher, tag;
+    reg u64 nbytes, abytes, ibytes, tbytes;
+    reg u64 authenticated;
+
+    cipher = (u64) [in];
+    tag = (u64) [in + 8];
+
+    nbytes = (u64) [bytes];
+    abytes = (u64) [bytes + 8];
+    ibytes = (u64) [bytes + 16];
+    tbytes = (u64) [bytes + 24];
+
+    keys = __aes256_key_expansion(key, keys);
+    authenticated = __aes_gcm_decrypt(cipher, tag, ivec, addt, out, nbytes, abytes, ibytes, tbytes, keys);
+
+    return authenticated;
+}

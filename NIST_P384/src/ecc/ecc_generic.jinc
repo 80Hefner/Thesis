@@ -1,0 +1,934 @@
+from NIST_P384 require "fp/fp_generic.jinc"
+require "ecc_param.jinc"
+
+inline fn __fp_copy(reg const ptr u64[NLIMBS] a, reg mut ptr u64[NLIMBS] r) -> reg ptr u64[NLIMBS] {
+    #secret reg u64 t;
+    inline int i;
+
+    for i = 0 to NLIMBS {
+        t = a[i];
+        r[i] = t;    
+    }
+
+    return r;
+}
+
+inline fn __ecc_copy(reg const ptr u64[NLIMBS] px py pz,
+                     reg mut ptr u64[NLIMBS] qx qy qz)
+                  -> reg ptr u64[NLIMBS], reg ptr u64[NLIMBS], reg ptr u64[NLIMBS] {
+    inline int i;
+    #secret reg u64 t;
+
+    // copy x
+    for i = 0 to NLIMBS {
+        t = px[i];
+        qx[i] = t;
+    }
+
+    // copy y
+    for i = 0 to NLIMBS {
+        t = py[i];
+        qy[i] = t;
+    }
+
+    // copy z
+    for i = 0 to NLIMBS {
+        t = pz[i];
+        qz[i] = t;
+    }
+    
+    return qx, qy, qz;
+}
+
+inline fn __conditional_mv_point(#secret reg bool cond,
+                                  reg const ptr u64[NLIMBS] src_x src_y src_z,
+                                  reg mut ptr u64[NLIMBS] dest_x dest_y dest_z)
+                               -> reg ptr u64[NLIMBS], reg ptr u64[NLIMBS],
+                                  reg ptr u64[NLIMBS] {
+    dest_x = __bn_cmov(cond, dest_x, src_x);
+    dest_y = __bn_cmov(cond, dest_y, src_y);
+    dest_z = __bn_cmov(cond, dest_z, src_z);
+ 
+    return dest_x, dest_y, dest_z;
+}
+
+inline fn __store_affine_point(#public reg u64 addr, reg ptr u64[NLIMBS] x y) {
+    #secret stack u64[2 * NLIMBS] tmp;
+    reg ptr u64[2 * NLIMBS] _tmp;
+
+    tmp = __bn_pack2(x, y);
+    _tmp = tmp;
+    __bn2_store(addr, _tmp);
+}
+
+inline fn __load_projective_point(#public reg u64 addr) -> #secret stack u64[NLIMBS], #secret stack u64[NLIMBS], #secret stack u64[NLIMBS] {
+    #secret stack u64[NLIMBS] x y z;
+    inline int i;
+
+    for i = 0 to NLIMBS {
+        x[i] = [addr + 8 * i];
+        y[i] = [addr + 8 * NLIMBS + 8 * i];
+        z[i] = [addr + 2 * 8 * NLIMBS + 8 * i];
+    }
+
+    return x, y, z;
+}
+
+inline fn __store_projective_point(#public reg u64 addr, reg ptr u64[NLIMBS] x y z) {
+    #secret reg u64 tmp;
+    inline int i;
+
+    
+    for i = 0 to NLIMBS {
+        // store x
+        tmp = x[i];
+        [addr + 8 * i] = tmp;
+
+        // store y
+        tmp = y[i];
+        [addr + 8 * NLIMBS + 8 * i] = tmp;
+
+        // store z
+        tmp = z[i];
+        [addr + 2 * 8 * NLIMBS + 8 * i] = tmp;
+    }
+}
+
+inline fn _ecc_double(#secret stack u64[NLIMBS] _px _py _pz _qx _qy _qz) -> #secret stack u64[NLIMBS], #secret stack u64[NLIMBS], #secret stack u64[NLIMBS] {    
+    #secret stack u64[NLIMBS] _t0 _t1 _t2 _t3;
+    #secret stack u64[NLIMBS] _tmp;
+    #secret reg ptr u64[NLIMBS] t0 t1 t2 t3 tmp px py pz qx qy qz;
+    #public reg ptr u64[NLIMBS] glob_bp;
+
+    // 1: t0 ← X · X
+    t0 = _t0; px = _px;
+    t0 = _fp_sqr(px, t0);
+    _t0 = t0; _px = px;
+
+    // 2: t1 ← Y · Y
+    t1 = _t1; py = _py;
+    t1 = _fp_sqr(py, t1);
+    _t1 = t1; _py = py;
+
+    // 3: t2 ← Z · Z
+    t2 = _t2; pz = _pz;
+    t2 = _fp_sqr(pz, t2);
+    _t2 = t2; _pz = pz;
+
+    // 4: t3 ← X · Y
+    t3 = _t3; px = _px; py = _py;
+    t3 = _fp_mul(px, py, t3);
+    _t3 = t3; _px = px; _py = py;
+
+    // 5: t3 ← t3 + t3
+    tmp = _tmp; t3 = _t3;
+    tmp = __fp_copy(t3, tmp); // tmp holds the result of t3
+    t3 = _fp_add(t3, tmp);
+    _tmp = tmp; _t3 = t3;
+
+    // 6: Z3 ← X · Z
+    qz = _qz; px = _px; pz = _pz;
+    qz = _fp_mul(px, pz, qz);
+    _qz = qz; _px = px; _pz = pz;
+
+    // 7: Z3 ← Z3 + Z3
+    tmp = _tmp; qz = _qz;
+    tmp = __fp_copy(qz, tmp); // tmp holds the result of z3;
+    qz = _fp_add(qz, tmp);
+    _tmp = tmp; _qz = qz;
+
+    // 8: Y3 ← b · t2
+    qy = _qy; t2 = _t2; glob_bp = glob_b;
+    qy = _fp_mul(glob_bp, t2, qy);
+    _qy = qy; _t2 = t2;
+
+    // 9: Y3 ← Y3 − Z3
+    qy = _qy; qz = _qz;
+    qy = _fp_sub(qy, qz);
+    _qy = qy; _qz = qz;
+
+    // 10: X3 ← Y3 + Y3
+    tmp = _tmp; qy = _qy; qx = _qx;
+    tmp = __fp_copy(qy, tmp);
+    tmp = _fp_add(tmp, qy);
+    qx = __fp_copy(tmp, qx);
+    _tmp = tmp; _qy = qy; _qx = qx;
+
+    // 11: Y3 ← X3 + Y3 == Y3 ← Y3 + X3
+    qy = _qy; qx = _qx;
+    qy = _fp_add(qy, qx);  
+    _qy = qy; _qx = qx;
+
+    // 12: X3 ← t1 − Y3
+    tmp = _tmp; t1 = _t1; qy = _qy; qx = _qx;
+    tmp = __fp_copy(t1, tmp);
+    tmp = _fp_sub(tmp, qy); // tmp holds the result of t1 - y3
+    qx = __fp_copy(tmp, qx);
+    _tmp = tmp; _t1 = t1; _qy = qy; _qx = qx;
+
+    // 13: Y3 ← t1 + Y3 == Y3 ← Y3 + t1
+    qy = _qy; t1 = _t1;
+    qy = _fp_add(qy, t1);
+    _qy = qy; _t1 = t1;
+
+    // 14: Y3 ← X3 · Y3 == Y3 ← Y3 · X3
+    qy = _qy; qx = _qx;
+    qy = _fp_mulU(qy, qx);
+    _qy = qy; _qx = qx;
+
+    // 15: X3 ← X3 · t3
+    qx = _qx; t3 = _t3;
+    qx = _fp_mulU(qx, t3);
+    _qx = qx; _t3 = t3;
+
+    // 16: t3 ← t2 + t2
+    tmp = _tmp; t2 = _t2; t3 = _t3;
+    tmp = __fp_copy(t2, tmp);
+    tmp = _fp_add(tmp, t2); // tmp holds the result of t2 + t2
+    t3 = __fp_copy(tmp, t3);
+    _tmp = tmp; _t2 = t2; _t3 = t3;
+
+    // 17: t2 ← t2 + t3
+    t2 = _t2; t3 = _t3;
+    t2 = _fp_add(t2, t3);
+    _t2 = t2; _t3 = t3;
+
+    // 18: Z3 ← b · Z3 == Z3 ← Z3 · b
+    qz = _qz; glob_bp = glob_b;
+    qz = _fp_mulU(qz, glob_bp);
+    _qz = qz;
+
+    // 19: Z3 ← Z3 − t2
+    qz = _qz; t2 = _t2;
+    qz = _fp_sub(qz, t2);
+    _qz = qz; _t2 = t2;
+
+    // 20: Z3 ← Z3 − t0
+    qz = _qz; t0 = _t0;
+    qz = _fp_sub(qz, t0);
+    _qz = qz; _t0 = t0;
+
+    // 21: t3 ← Z3 + Z3
+    tmp = _tmp; qz = _qz; t3 = _t3;
+    tmp = __fp_copy(qz, tmp);
+    tmp = _fp_add(tmp, qz); // tmp holds the result of qz + qz
+    t3 = __fp_copy(tmp, t3);
+    _tmp = tmp; _qz = qz; _t3 = t3;
+
+    // 22: Z3 ← Z3 + t3
+    qz = _qz; t3 = _t3;
+    qz = _fp_add(qz, t3);
+    _qz = qz; _t3 = t3;
+
+    // 23: t3 ← t0 + t0
+    tmp = _tmp; t0 = _t0; t3 = _t3;
+    tmp = __fp_copy(t0, tmp);
+    tmp = _fp_add(tmp, t0); // tmp holds the result of t0 + t0
+    t3 = __fp_copy(tmp, t3);
+    _tmp = tmp; _t0 = t0; _t3 = t3;
+
+    // 24: t0 ← t3 + t0 == t0 ← t0 + t3
+    t0 = _t0; t3 = _t3;
+    t0 = _fp_add(t0, t3);
+    _t0 = t0; _t3 = t3;
+
+    // 25: t0 ← t0 − t2
+    t0 = _t0; t2 = _t2;
+    t0 = _fp_sub(t0, t2);
+    _t0 = t0; _t2 = t2;
+
+    // 26: t0 ← t0 · Z3
+    t0 = _t0; qz = _qz;
+    t0 = _fp_mulU(t0, qz);
+    _t0 = t0; _qz = qz;
+
+    // 27: Y3 ← Y3 + t0
+    qy = _qy; t0 = _t0;
+    qy = _fp_add(qy, t0);
+    _qy = qy; _t0 = t0;
+
+    // 28: t0 ← Y · Z
+    t0 = _t0; py = _py; pz = _pz;
+    t0 = _fp_mul(py, pz, t0);
+    _t0 = t0; _py = py; _pz = pz;
+
+    // 29: t0 ← t0 + t0
+    tmp = _tmp; t0 = _t0;
+    tmp = __fp_copy(t0, tmp);
+    t0 = _fp_add(t0, tmp);
+    _tmp = tmp; _t0 = t0;
+
+    // 30: Z3 ← t0 · Z3 == Z3 ← Z3 · t0
+    qz = _qz; t0 = _t0;
+    qz = _fp_mulU(qz, t0);
+    _qz = qz; _t0 = t0;
+
+    // 31: X3 ← X3 − Z3
+    qx = _qx; qz = _qz;
+    qx = _fp_sub(qx, qz);
+    _qx = qx; _qz = qz;
+
+    // 32: Z3 ← t0 · t1
+    qz = _qz; t0 = _t0; t1 = _t1;
+    qz = _fp_mul(t0, t1, qz);
+    _qz = qz; _t0 = t0; _t1 = t1;
+
+    // 33: Z3 ← Z3 + Z3
+    tmp = _tmp; qz = _qz;
+    tmp = __fp_copy(qz, tmp);
+    qz = _fp_add(qz, tmp);
+    _tmp = tmp; _qz = qz;
+
+    // 34: Z3 ← Z3 + Z3
+    tmp = _tmp; qz = _qz;
+    tmp = __fp_copy(qz, tmp);
+    qz = _fp_add(qz, tmp);
+    _tmp = tmp; _qz = qz;
+
+    return _qx, _qy, _qz;
+}
+
+inline fn _ecc_add(#secret stack u64[NLIMBS] _x1 _y1 _z1 _x2 _y2 _z2 _x3 _y3 _z3) 
+                -> #secret stack u64[NLIMBS], #secret stack u64[NLIMBS], #secret stack u64[NLIMBS] {
+    #secret stack u64[NLIMBS] _t0 _t1 _t2 _t3 _t4;
+    #secret stack u64[NLIMBS] _tmp;
+    #secret reg ptr u64[NLIMBS] t0 t1 t2 t3 t4 tmp x1 y1 z1 x2 y2 z2 x3 y3 z3;
+    #public reg ptr u64[NLIMBS] glob_bp;
+
+    // 1: t0 ← X1 · X2
+    t0 = _t0; x1 = _x1; x2 = _x2;
+    t0 = _fp_mul(x1, x2, t0);
+    _t0 = t0; _x1 = x1; _x2 = x2;
+
+    // 2: t1 ← Y1 · Y2
+    t1 = _t1; y1 = _y1; y2 = _y2;
+    t1 = _fp_mul(y1, y2, t1);
+    _t1 = t1; _y1 = y1; y2 = _y2;
+
+    // 3: t2 ← Z1 · Z2
+    t2 = _t2; z1 = _z1; z2 = _z2;
+    t2 = _fp_mul(z1, z2, t2);
+    _t2 = t2; _z1 = z1; _z2 = z2;
+
+    // 4: t3 ← X1 + Y1
+    t3 = _t3; tmp = _tmp; x1 = _x1; y1 = _y1;
+    tmp = __fp_copy(x1, tmp); // tmp holds the result of x1
+    tmp = _fp_add(tmp, y1);   // tmp holds the result of x1 + y1
+    t3 = __fp_copy(tmp, t3);
+    _t3 = t3; _tmp = tmp; _x1 = x1; _y1 = y1;
+
+    // 5: t4 ← X2 + Y2
+    t4 = _t4; tmp = _tmp; x2 = _x2; y2 = _y2;
+    tmp = __fp_copy(x2, tmp); // tmp holds the result of x2
+    tmp = _fp_add(tmp, y2);   // tmp holds the result of x2 + y2
+    t4 = __fp_copy(tmp, t4);
+    _t4 = t4; _tmp = tmp; _x2 = x2; y2 = _y2;
+
+    // 6: t3 ← t3 · t4
+    t3 = _t3; t4 = _t4; tmp = _tmp;
+    tmp = __fp_copy(t3, tmp);  // tmp holds the result of t3
+    t3 = _fp_mul(tmp, t4, t3); // tmp holds the result of t3 . t4
+    _t3 = t3; _t4 = t4; _tmp = tmp;
+
+    // 7: t4 ← t0 + t1
+    t0 = _t0; t1 = _t1; t4 = _t4; tmp = _tmp;
+    tmp = __fp_copy(t0, tmp); // tmp holds the result of t0
+    tmp = _fp_add(tmp, t1);   // tmp holds the result of t0 + t1
+    t4 = __fp_copy(tmp, t4); 
+    _t0 = t0; _t1 = t1; _t4 = t4; _tmp = tmp;
+
+    // 8: t3 ← t3 − t4
+    t3 = _t3; t4 = _t4;
+    t3 = _fp_sub(t3, t4);
+    _t3 = t3; _t4 = t4;
+
+    // 9: t4 ← Y1 + Z1
+    t4 = _t4; tmp = _tmp; y1 = _y1; z1 = _z1;
+    tmp = __fp_copy(y1, tmp);  // tmp holds the result of y1
+    tmp = _fp_add(tmp, z1);    // tmp holds the result of y1 + z1
+    t4 = __fp_copy(tmp, t4);
+    _t4 = t4; _tmp = tmp; _y1 = y1; _z1 = z1;
+
+    // 10: X3 ← Y2 + Z2
+    tmp = _tmp; y2 = _y2; z2 = _z2; x3 = _x3;
+    tmp = __fp_copy(y2, tmp);  // tmp holds the result of y2
+    tmp = _fp_add(tmp, z2);    // tmp holds the result of y2 + z2
+    x3 = __fp_copy(tmp, x3); 
+    _tmp = tmp; y2 = _y2; _z2 = z2; _x3 = x3;
+
+    // 11: t4 ← t4 · X3
+    t4 = _t4; x3 = _x3;
+    t4 = _fp_mulU(t4, x3);
+    _t4 = t4; _x3 = x3;
+
+    // 12: X3 ← t1 + t2
+    t1 = _t1; t2 = _t2; tmp = _tmp; x3 = _x3;
+    tmp = __fp_copy(t1, tmp);  // tmp holds the result of t1
+    tmp = _fp_add(tmp, t2);    // tmp holds the result of t1 + t2
+    x3 = __fp_copy(tmp, x3);
+    _t1 = t1; _t2 = t2; _tmp = tmp; _x3 = x3;
+
+    // 13: t4 ← t4 − X3
+    t4 = _t4; x3 = _x3;
+    t4 = _fp_sub(t4, x3);
+    _t4 = t4; _x3 = x3;
+
+    // 14: X3 ← X1 + Z1
+    tmp = _tmp; x1 = _x1; z1 = _z1; x3 = _x3;
+    tmp = __fp_copy(x1, tmp); // tmp holds the result of x1
+    tmp = _fp_add(tmp, z1);   // tmp holds the result of x1 + z1
+    x3 = __fp_copy(tmp, x3);
+    _tmp = tmp; _x1 = x1; _z1 = z1; _x3 = x3;
+
+    // 15: Y3 ← X2 + Z2
+    tmp = _tmp; x2 = _x2; z2 = _z2; y3 = _y3;
+    tmp = __fp_copy(x2, tmp);
+    tmp = _fp_add(tmp, z2);   // tmp holds the result of x2 + z2
+    y3 = __fp_copy(tmp, y3);
+    _tmp = tmp; _x2 = x2; _z2 = z2; _y3 = y3;
+
+    // 16: X3 ← X3 · Y3
+    x3 = _x3; y3 = _y3;
+    x3 = _fp_mulU(x3, y3);
+    _x3 = x3; _y3 = y3;
+
+    // 17: Y3 ← t0 + t2
+    t0 = _t0; t2 = _t2; tmp = _tmp; y3 = _y3;
+    tmp = __fp_copy(t0, tmp);
+    tmp = _fp_add(tmp, t2); // tmp holds the result of t0 + t2
+    y3 = __fp_copy(tmp, y3);
+    _t0 = t0; _t2 = t2; _tmp = tmp; _y3 = y3;
+
+    // 18: Y3 ← X3 − Y3
+    tmp = _tmp; x3 = _x3; y3 = _y3;
+    tmp = __fp_copy(x3, tmp);
+    tmp = _fp_sub(tmp, y3); // tmp holds the result of x3 - y3
+    y3 = __fp_copy(tmp, y3);
+    _tmp = tmp; _x3 = x3; _y3 = y3;
+
+    // 19: Z3 ← b · t2
+    t2 = _t2; z3 = _z3; glob_bp = glob_b;
+    z3 = _fp_mul(glob_bp, t2, z3);
+    _t2 = t2; _z3 = z3;
+
+    // 20: X3 ← Y3 − Z3
+    tmp = _tmp; x3 = _x3; y3 = _y3; z3 = _z3;
+    tmp = __fp_copy(y3, tmp);
+    tmp = _fp_sub(tmp, z3); // tmp holds the result of y3 - z3
+    x3 = __fp_copy(tmp, x3);
+    _tmp = tmp; _x3 = x3; _y3 = y3; _z3 = z3;
+
+    // 21: Z3 ← X3 + X3
+    tmp = _tmp; x3 = _x3; z3 = _z3;
+    tmp = __fp_copy(x3, tmp);
+    tmp = _fp_add(tmp, x3); // tmp holds the result of x3 + x3
+    z3 = __fp_copy(tmp, z3);
+    _tmp = tmp; _x3 = x3; _z3 = z3;
+
+    // 22: X3 ← X3 + Z3
+    tmp = _tmp; x3 = _x3; z3 = _z3;
+    tmp = __fp_copy(z3, tmp); // tmp holds the value of z3
+    x3 = _fp_add(x3, tmp);
+    _tmp = tmp; _x3 = x3; _z3 = z3;
+
+    // 23: Z3 ← t1 − X3
+    t1 = _t1; tmp = _tmp; x3 = _x3; z3 = _z3;
+    tmp = __fp_copy(t1, tmp);
+    tmp = _fp_sub(tmp, x3); // tmp holds the result of t1 - x3
+    z3 = __fp_copy(tmp, z3);
+    _t1 = t1; _tmp = tmp; _x3 = x3; _z3 = z3;
+
+    // 24: X3 ← t1 + X3 == X3 ← X3 + t1
+    t1 = _t1; x3 = _x3;
+    x3 = _fp_add(x3, t1);
+    _t1 = t1; _x3 = x3;
+
+    // 25: Y3 ← b · Y3
+    y3 = _y3; glob_bp = glob_b;
+    y3 = _fp_mulU(y3, glob_bp);
+    _y3 = y3;
+
+    // 26: t1 ← t2 + t2
+    t1 = _t1; t2 = _t2; tmp = _tmp;
+    tmp = __fp_copy(t2, tmp);
+    tmp = _fp_add(tmp, t2); // tmp holds the result of t2 + t2
+    t1 = __fp_copy(tmp, t1);
+    _t1 = t1; _t2 = t2; _tmp = tmp;
+
+    // 27: t2 ← t1 + t2 == t2 ← t2 + t1
+    t1 = _t1; t2 = _t2;
+    t2 = _fp_add(t2, t1);
+    _t1 = t1; _t2 = t2;
+
+    // 28: Y3 ← Y3 − t2
+    t2 = _t2; y3 = _y3;
+    y3 = _fp_sub(y3, t2);
+    _t2 = t2; _y3 = y3;
+
+    // 29: Y3 ← Y3 − t0
+    t0 = _t0; y3 = _y3;
+    y3 = _fp_sub(y3, t0);
+    _t0 = t0; _y3 = y3;
+
+    // 30: t1 ← Y3 + Y3
+    t1 = _t1; tmp = _tmp; y3 = _y3;
+    tmp = __fp_copy(y3, tmp);
+    tmp = _fp_add(tmp, y3); // tmp holds the result of y3 + y3
+    t1 = __fp_copy(tmp, t1);
+    _t1 = t1; _tmp = tmp; _y3 = y3;
+
+    // 31: Y3 ← t1 + Y3 == Y3 ← Y3 + t1
+    t1 = _t1; y3 = _y3;
+    y3 = _fp_add(y3, t1);
+    _t1 = t1; _y3 = y3;
+
+    // 32: t1 ← t0 + t0
+    t0 = _t0; t1 = _t1; tmp = _tmp;
+    tmp = __fp_copy(t0, tmp);
+    tmp = _fp_add(tmp, t0); // tmp holds the result of t0 + t0
+    t1 = __fp_copy(tmp, t1);
+    _t0 = t0; _t1 = t1; _tmp = tmp;
+
+    // 33: t0 ← t1 + t0 == t0 ← t0 + t1
+    t0 = _t0; t1 = _t1;
+    t0 = _fp_add(t0, t1);
+    _t0 = t0; _t1 = t1;
+
+    // 34: t0 ← t0 − t2
+    t0 = _t0; t2 = _t2;
+    t0 = _fp_sub(t0, t2);
+    _t0 = t0; _t2 = t2;
+
+    // 35: t1 ← t4 · Y3
+    t1 = _t1; t4 = _t4; y3 = _y3;
+    t1 = _fp_mul(t4, y3, t1);
+    _t1 = t1; _t4 = t4; _y3 = y3;
+
+    // 36: t2 ← t0 · Y3
+    t0 = _t0; t2 = _t2; y3 = _y3;
+    t2 = _fp_mul(t0, y3, t2);
+    _t0 = t0; _t2 = t2; _y3 = y3;
+
+    // 37: Y3 ← X3 · Z3
+    x3 = _x3; y3 = _y3; z3 = _z3;
+    y3 = _fp_mul(x3, z3, y3);
+    _x3 = x3; _y3 = y3; _z3 = z3;
+
+    // 38: Y3 ← Y3 + t2
+    t2 = _t2; y3 = _y3;
+    y3 = _fp_add(y3, t2);
+    _t2 = t2; _y3 = y3;
+
+    // 39: X3 ← t3 · X3
+    t3 = _t3; tmp = _tmp; x3 = _x3;
+    tmp = __fp_copy(x3, tmp);
+    x3 = _fp_mul(t3, tmp, x3);
+    _t3 = t3; _tmp = tmp; _x3 = x3;
+
+    // 40: X3 ← X3 − t1
+    t1 = _t1; x3 = _x3;
+    x3 = _fp_sub(x3, t1);
+    _t1 = t1; _x3 = x3;
+
+    // 41: Z3 ← t4 · Z3
+    t4 = _t4; tmp = _tmp; z3 = _z3;
+    tmp = __fp_copy(z3, tmp);
+    z3 = _fp_mul(t4, tmp, z3);
+    _t4 = t4; _tmp = tmp; _z3 = z3;
+
+    // 42: t1 ← t3 · t0
+    t0 = _t0; t1 = _t1; t3 = _t3;
+    t1 = _fp_mul(t3, t0, t1);
+    _t0 = t0; _t1 = t1; _t3 = t3;
+
+    // 43: Z3 ← Z3 + t1
+    t1 = _t1; z3 = _z3;
+    z3 = _fp_add(z3, t1);
+    _t1 = t1; _z3 = z3;
+
+    return _x3, _y3, _z3;
+}
+
+inline fn _ecc_scalar_mul(#secret stack u64[NLIMBS] scalar,
+                          #secret stack u64[NLIMBS] _r0x _r0y _r0z
+                                                    _r1x _r1y _r1z)
+                       -> #secret stack u64[NLIMBS], 
+                          #secret stack u64[NLIMBS], 
+                          #secret stack u64[NLIMBS] {
+
+    inline int i; // to iterate over the limbs of a BN
+    #public reg u64 k; stack u64 sk; // to iterate over the bits of a limb
+    #public reg u64 t; stack u64 st; // current limb
+
+    reg bool cond cf;
+
+    #secret stack u64[NLIMBS] _tmpx _tmpy _tmpz;
+    #secret reg ptr u64[NLIMBS] r0x r0y r0z r1x r1y r1z tmpx tmpy tmpz;
+
+    // R0 ← 0
+    // Point at infinity = (0 : 1 : 0)
+    for i = 0 to NLIMBS {
+        t = glob_oneM[i];
+        _r0x[i] = 0;
+        _r0y[i] = t;
+        _r0z[i] = 0;
+    }
+
+    // R1 ← P // already set
+
+    for i = NLIMBS-1 downto -1 {
+        t = scalar[(int) i];
+
+        k = 64;
+        while { cond = (k > 0); } (cond) {
+            sk = k; // spill k
+
+            
+            _, cf, _, _, _, t = #SHL(t, 1);
+            st = t; // spill limb
+
+            if (cf) {
+
+                // R0 ← R0 + R1
+                _tmpx, _tmpy, _tmpz = _ecc_add(_r0x, _r0y, _r0z, _r1x, _r1y, _r1z, _tmpx, _tmpy, _tmpz);
+                r0x = _r0x; r0y = _r0y; r0z = _r0z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+                r0x, r0y, r0z = __ecc_copy(tmpx, tmpy, tmpz, r0x, r0y, r0z);
+                _r0x = r0x; _r0y = r0y; _r0z = r0z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+
+                // R1 ← 2 . R1
+                _tmpx, _tmpy, _tmpz = _ecc_double(_r1x, _r1y, _r1z, _tmpx, _tmpy, _tmpz);
+                r1x = _r1x; r1y = _r1y; r1z = _r1z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+                r1x, r1y, r1z = __ecc_copy(tmpx, tmpy, tmpz, r1x, r1y, r1z);
+                _r1x = r1x; _r1y = r1y; _r1z = r1z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+            } else { 
+
+                // R1 ← R0 + R1
+                _tmpx, _tmpy, _tmpz = _ecc_add(_r0x, _r0y, _r0z, _r1x, _r1y, _r1z, _tmpx, _tmpy, _tmpz);
+                r1x = _r1x; r1y = _r1y; r1z = _r1z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+                r1x, r1y, r1z = __ecc_copy(tmpx, tmpy, tmpz, r1x, r1y, r1z);
+                _r1x = r1x; _r1y = r1y; _r1z = r1z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+
+                // R0 ← 2 . R0
+                _tmpx, _tmpy, _tmpz = _ecc_double(_r0x, _r0y, _r0z, _tmpx, _tmpy, _tmpz);
+                r0x = _r0x; r0y = _r0y; r0z = _r0z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+                r0x, r0y, r0z = __ecc_copy(tmpx, tmpy, tmpz, r0x, r0y, r0z);
+                _r0x = r0x; _r0y = r0y; _r0z = r0z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+            }
+            
+            k = sk;
+            k -= 1;
+        }
+    }
+
+    return _r0x, _r0y, _r0z;
+}
+
+inline fn _ecc_branchless_scalar_mul(#secret stack u64[NLIMBS] scalar
+                                       _r0x _r0y _r0z
+                                       _r1x _r1y _r1z)
+                       -> #secret stack u64[NLIMBS], 
+                          #secret stack u64[NLIMBS], 
+                          #secret stack u64[NLIMBS]{
+
+    inline int i; // to iterate over the limbs of a BN
+    #public reg u64 k; stack u64 sk; // to iterate over the bits of a limb
+    #public reg u64 t; stack u64 st; // current limb
+
+    reg bool cond cf;
+
+    #secret stack u64[NLIMBS] _tmpx _tmpy _tmpz;
+    #secret stack u64[NLIMBS] _doubleR0x _doubleR0y _doubleR0z;
+    #secret stack u64[NLIMBS] _doubleR1x _doubleR1y _doubleR1z;
+    #secret reg ptr u64[NLIMBS] tmpx tmpy tmpz doubleR0x doubleR0y doubleR0z doubleR1x doubleR1y doubleR1z;
+    #secret reg ptr u64[NLIMBS] r0x r0y r0z r1x r1y r1z;
+
+    // R0 ← 0
+    // Point at infinity = (0 : 1 : 0)
+    for i = 0 to NLIMBS {
+        t = glob_oneM[i];
+        _r0x[i] = 0;
+        _r0y[i] = t;
+        _r0z[i] = 0;
+    }
+
+    // R1 ← P // already set
+
+    for i = NLIMBS-1 downto -1 {
+        t = scalar[(int) i];
+
+        k = 64;
+        while { cond = (k > 0); } (cond) {
+            sk = k; // spill k
+            st = t; // spill limb
+
+            // TMP HOLDS THE RESULT R0 + R1
+            _tmpx, _tmpy, _tmpz = _ecc_add(_r0x, _r0y, _r0z, _r1x, _r1y, _r1z, _tmpx, _tmpy, _tmpz);
+
+            // value of 2 . R1
+            _doubleR1x, _doubleR1y, _doubleR1z = _ecc_double(_r1x, _r1y, _r1z, _doubleR1x, _doubleR1y, _doubleR1z); 
+
+            // value of 2 . R0
+            _doubleR0x, _doubleR0y, _doubleR0z = _ecc_double(_r0x, _r0y, _r0z, _doubleR0x, _doubleR0y, _doubleR0z);
+
+            t = st;
+            _, cf, _, _, _, t = #SHL(t, 1); // we only shift t here because previous instruction change the value of the cf
+
+            // if !cf:
+            // R1 ← R0 + R1
+            r1x = _r1x; r1y = _r1y; r1z = _r1z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+            r1x, r1y, r1z = __ecc_copy(tmpx, tmpy, tmpz, r1x, r1y, r1z);
+            _r1x = r1x; _r1y = r1y; _r1z = r1z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+            // R0 ← 2 . R0
+            r0x = _r0x; r0y = _r0y; r0z = _r0z; doubleR0x = _doubleR0x; doubleR0y = _doubleR0y; doubleR0z = _doubleR0z;
+            r0x, r0y, r0z = __ecc_copy(doubleR0x, doubleR0y, doubleR0z, r0x, r0y, r0z);
+            _r0x = r0x; _r0y = r0y; _r0z = r0z; _doubleR0x = doubleR0x; _doubleR0y = doubleR0y; _doubleR0z = doubleR0z;
+
+            // if cf: 
+            //  R0 ← R0 + R1
+            r0x = _r0x; r0y = _r0y; r0z = _r0z; tmpx = _tmpx; tmpy = _tmpy; tmpz = _tmpz;
+            r0x, r0y, r0z = __conditional_mv_point(cf, tmpx, tmpy, tmpz, r0x, r0y, r0z);
+            _r0x = r0x; _r0y = r0y; _r0z = r0z; _tmpx = tmpx; _tmpy = tmpy; _tmpz = tmpz;
+            //  R1 ← 2 . R1
+            r1x = _r1x; r1y = _r1y; r1z = _r1z; doubleR1x = _doubleR1x; doubleR1y = _doubleR1y; doubleR1z = _doubleR1z;
+            r1x, r1y, r1z = __conditional_mv_point(cf, doubleR1x, doubleR1y, doubleR1z, r1x, r1y, r1z);
+            _r1x = r1x; _r1y = r1y; _r1z = r1z; _doubleR1x = doubleR1x; _doubleR1y = doubleR1y; _doubleR1z = doubleR1z;
+            
+            k = sk;
+            k -= 1;
+        }
+    }
+
+    return _r0x, _r0y, _r0z;
+}
+
+inline fn __ecc_normalize(#secret stack u64[NLIMBS] _px _py _pz)
+                       -> #secret stack u64[NLIMBS], #secret stack u64[NLIMBS] {
+    #secret stack u64[NLIMBS] _z_inv _xa _ya;
+    #secret reg ptr u64[NLIMBS] z_inv xa ya px py pz;
+
+    z_inv = _z_inv; pz = _pz;
+    z_inv = __fp_inv(pz, z_inv); // compute the multiplicative inverse of z 
+    _z_inv = z_inv; _pz = pz;
+    
+    z_inv = _z_inv; xa = _xa; px = _px;
+    xa = _fp_mul(px, z_inv, xa);
+    _z_inv = z_inv; _xa = xa; _px = px;
+    
+    z_inv = _z_inv; ya = _ya; py = _py;
+    ya = _fp_mul(py, z_inv, ya);
+    _z_inv = z_inv; _ya = ya; _py = py;
+
+    return _xa, _ya;
+}
+
+inline fn __ecc_mixed_add(#secret stack u64[NLIMBS] _x1 _y1 _z1 _x2 _y2) 
+                       -> #secret stack u64[NLIMBS], #secret stack u64[NLIMBS], 
+                          #secret stack u64[NLIMBS] {
+    #secret stack u64[NLIMBS] _x3 _y3 _z3;
+    #secret stack u64[NLIMBS] _t0 _t1 _t2 _t3 _t4;
+    #secret stack u64[NLIMBS] _tmp;
+    #secret reg ptr u64[NLIMBS] t0 t1 t2 t3 t4 tmp x1 y1 z1 x2 y2 x3 y3 z3;
+    #public reg ptr u64[NLIMBS] glob_bp;
+
+    // 1: t0 ← X1 · X2
+    t0 = _t0; x1 = _x1; x2 = _x2;
+    t0 = _fp_mul(x1, x2, t0);
+    _t0 = t0; _x1 = x1; _x2 = x2;
+
+    // 2: t1 ← Y1 · Y2
+    t1 = _t1; y1 = _y1; y2 = _y2;
+    t1 = _fp_mul(y1, y2, t1);
+    _t1 = t1; _y1 = y1; _y2 = y2;
+
+    // 3: t3 ← X2 + Y2
+    t3 = _t3; tmp = _tmp; x2 = _x2; y2 = _y2;
+    tmp = __fp_copy(x2, tmp); // tmp hols the value of x2
+    tmp = _fp_add(tmp, y2);   // tmp holds the result of x2 + y2
+    t3 = __fp_copy(tmp, t3);
+    _t3 = t3; _tmp = tmp; _x2 = x2; _y2 = y2;
+
+    // 4: t4 ← X1 + Y1
+    t4 = _t4; tmp = _tmp; x1 = _x1; y1 = _y1;
+    tmp = __fp_copy(x1, tmp);  // tmp holds the tmp holds the value of x1
+    tmp = _fp_add(tmp, y1);    // tmp holds the result of x1 + y1
+    t4 = __fp_copy(tmp, t4);
+    _t4 = t4; _tmp = tmp; _x1 = x1; _y1 = y1;
+
+    // 5: t3 ← t3 · t4
+    t3 = _t3; t4 = _t4;
+    t3 = _fp_mulU(t3, t4);
+    _t3 = t3; _t4 = t4;
+
+    // 6: t4 ← t0 + t1
+    t0 = _t0; t1 = _t1; t4 = _t4; tmp = _tmp;
+    tmp = __fp_copy(t0, tmp); // tmp holds the value of t0
+    tmp = _fp_add(tmp, t1);   // tmp holds the result of t0 + t1
+    t4 = __fp_copy(tmp, t4);
+    _t0 = t0; _t1 = t1; _t4 = t4; _tmp = tmp;
+
+    // 7: t3 ← t3 − t4
+    t3 = _t3; t4 = _t4;
+    t3 = _fp_sub(t3, t4);
+    _t3 = t3; _t4 = t4;
+
+    // 8: t4 ← Y2 · Z1
+    t4 = _t4; z1 = _z1; y2 = _y2;
+    t4 = _fp_mul(y2, z1, t4);
+    _t4 = t4; _z1 = z1; _y2 = y2;
+
+    // 9: t4 ← t4 + Y1
+    t4 = _t4; y1 = _y1;
+    t4 = _fp_add(t4, y1);
+    _t4 = t4; _y1 = y1;
+
+    // 10: Y3 ← X2 · Z1
+    z1 = _z1; x2 = _x2; y3 = _y3;
+    y3 = _fp_mul(x2, z1, y3);
+    _z1 = z1; _x2 = x2; _y3 = y3;
+
+    // 11: Y3 ← Y3 + X1
+    x1 = _x1; y3 = _y3;
+    y3 = _fp_add(y3, x1);
+    _x1 = x1; _y3 = y3;
+
+    // 12: Z3 ← b · Z1
+    z1 = _z1; z3 = _z3; glob_bp = glob_b;
+    z3 = _fp_mul(glob_bp, z1, z3);
+    _z1 = z1; _z3 = z3;
+
+    // 13: X3 ← Y3 − Z3
+    tmp = _tmp; x3 = _x3; y3 = _y3; z3 = _z3;
+    tmp = __fp_copy(y3, tmp); // tmp holds the result of y3
+    tmp = _fp_sub(tmp, z3);   // tmp holds the result of y3 - z3
+    x3 = __fp_copy(tmp, x3);
+    _tmp = tmp; _x3 = x3; _y3 = y3; _z3 = z3;
+
+    // 14: Z3 ← X3 + X3
+    tmp = _tmp; x3 = _x3; z3 = _z3;
+    tmp = __fp_copy(x3, tmp); // tmp holds the result of x3
+    tmp = _fp_add(tmp, x3);   // tmp holds the result of x3 + x3
+    z3 = __fp_copy(tmp, z3); 
+    _tmp = tmp; _x3 = x3; _z3 = z3;
+
+    // 15: X3 ← X3 + Z3
+    x3 = _x3; z3 = _z3;
+    x3 = _fp_add(x3, z3); 
+    _x3 = x3; _z3 = z3;
+
+    // 16: Z3 ← t1 − X3
+    t1 = _t1; tmp = _tmp; x3 = _x3; z3 = _z3;
+    tmp = __fp_copy(t1, tmp); // tmp holds the result of t1
+    tmp = _fp_sub(tmp, x3);   // tmp holds the result of t1 - x3
+    z3 = __fp_copy(tmp, z3); 
+    _t1 = t1; _tmp = tmp; _x3 = x3; _z3 = z3;
+
+    // 17: X3 ← t1 + X3 == X3 ← X3 + t1
+    t1 = _t1; x3 = _x3;
+    x3 = _fp_add(x3, t1);
+    _t1 = t1; _x3 = x3;
+
+    // 18: Y3 ← b · Y3 == Y3 ← Y3 · b
+    y3 = _y3; glob_bp = glob_b;
+    y3 = _fp_mulU(y3, glob_bp);
+    _y3 = y3;
+
+    // 19: t1 ← Z1 + Z1
+    t1 = _t1; tmp = _tmp; z1 = _z1;
+    tmp = __fp_copy(z1, tmp); // tmp holds the result of z1
+    tmp = _fp_add(tmp, z1);   // tmp holds the result of z1 + z1
+    t1 = __fp_copy(tmp, t1); 
+    _t1 = t1; _tmp = tmp; _z1 = z1;
+
+    // 20: t2 ← t1 + Z1
+    t1 = _t1; t2 = _t2; tmp = _tmp; z1 = _z1;
+    tmp = __fp_copy(t1, tmp); // tmp holds the value of t1 
+    tmp = _fp_add(tmp, z1);  // tmp holds the result of t1 + z1
+    t2 = __fp_copy(tmp, t2);
+    _t1 = t1; _t2 = t2; _tmp = tmp; _z1 = z1;
+
+    // 21: Y3 ← Y3 − t2
+    t2 = _t2; y3 = _y3;
+    y3 = _fp_sub(y3, t2);
+    _t2 = t2; _y3 = y3;
+
+    // 22: Y3 ← Y3 − t0
+    t0 = _t0; y3 = _y3;
+    y3 = _fp_sub(y3, t0);
+    _t0 = t0; _y3 = y3;
+
+    // 23: t1 ← Y3 + Y3
+    t1 = _t1; tmp = _tmp; y3 = _y3;
+    tmp = __fp_copy(y3, tmp);
+    tmp = _fp_add(tmp, y3); // tmp holds the result of y3 + y3
+    t1 = __fp_copy(tmp, t1);
+    _t1 = t1; _tmp = tmp; _y3 = y3;
+
+    // 24: Y3 ← t1 + Y3 == Y3 ← Y3 + t1
+    t1 = _t1; y3 = _y3;
+    y3 = _fp_add(y3, t1);
+    _t1 = t1; _y3 = y3;
+
+    // 25: t1 ← t0 + t0
+    t0 = _t0; t1 = _t1; tmp = _tmp;
+    tmp = __fp_copy(t0, tmp); // tmp holds the result of t0 
+    tmp = _fp_add(tmp, t0);   // tmp holds the result of t0 + t0
+    t1 = __fp_copy(tmp, t1); 
+    _t0 = t0; _t1 = t1; _tmp = tmp;
+
+    // 26: t0 ← t1 + t0 == t0 ← t0 + t1
+    t0 = _t0; t1 = _t1;
+    t0 = _fp_add(t0, t1);
+    _t0 = t0; _t1 = t1;
+
+    // 27: t0 ← t0 − t2
+    t0 = _t0; t2 = _t2;
+    t0 = _fp_sub(t0, t2);
+    _t0 = t0; _t2 = t2;
+
+    // 28: t1 ← t4 · Y3
+    t1 = _t1; t4 = _t4; y3 = _y3;
+    t1 = _fp_mul(t4, y3, t1);
+    _t1 = t1; _t4 = t4; _y3 = y3;
+
+    // 29: t2 ← t0 · Y3
+    t0 = _t0; t2 = _t2; y3 = _y3;
+    t2 = _fp_mul(t0, y3, t2);
+    _t0 = t0; _t2 = t2; _y3 = y3;
+
+    // 30: Y3 ← X3 · Z3
+    x3 = _x3; y3 = _y3; z3 = _z3;
+    y3 = _fp_mul(x3, z3, y3);
+    _x3 = x3; _y3 = y3; _z3 = z3;
+
+    // 31: Y3 ← Y3 + t2
+    t2 = _t2; y3 = _y3;
+    y3 = _fp_add(y3, t2);
+    _t2 = t2; _y3 = y3;
+
+    // 32: X3 ← t3 · X3 == X3 ← X3 · t3
+    t3 = _t3; x3 = _x3;
+    x3 = _fp_mulU(x3, t3);
+    _t3 = t3; _x3 = x3;
+
+    // 33: X3 ← X3 − t1
+    t1 = _t1; x3 = _x3;
+    x3 = _fp_sub(x3, t1);
+    _t1 = t1; _x3 = x3;
+
+    // 34: Z3 ← t4 · Z3 == Z3 ← Z3 · t4
+    t4 = _t4; z3 = _z3;
+    z3 = _fp_mulU(z3, t4);
+    _t4 = t4; _z3 = z3;
+
+    // 35: t1 ← t3 · t0
+    t0 = _t0; t1 = _t1; t3 = _t3;
+    t1 = _fp_mul(t3, t0, t1);
+    _t0 = t0; _t1 = t1; _t3 = t3;
+
+    // 36: Z3 ← Z3 + t1
+    t1 = _t1; z3 = _z3;
+    z3 = _fp_add(z3, t1);
+    _t1 = t1; _z3 = z3;
+
+    return _x3, _y3, _z3;
+}

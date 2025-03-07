@@ -1,0 +1,63 @@
+require "aes_ctr_globals.jinc"
+require "../aes/aes.jinc"
+
+inline fn __store(reg u128 xmm, stack u8[16] arr) -> stack u8[16]
+{
+    arr[u128 0] = xmm;
+
+    return arr;
+}
+
+inline fn __aes_ctr(reg u64 input iv nonce output len, stack u128[NKEYS] keys)
+{
+    reg u128 ctr_block, tmp;
+    reg u64 i;
+    stack u8[16] lbarr_s;
+
+    // Insert iv and nonce in a 16byte block
+    // ┌────────────────┬────────────────────────────────┬────────────────┐
+    // │  zero padding  │     initialization vector      │     nonce      │
+    // │   (4 bytes)    │           (8 bytes)            │   (4 bytes)    │
+    // └────────────────┴────────────────────────────────┴────────────────┘
+    ctr_block = #VPINSR_2u64(ctr_block, (u64) [iv], 1);
+    ctr_block = #VPINSR_4u32(ctr_block, (u32) [nonce], 1);
+    ctr_block = #VPSRLDQ_128(ctr_block, 4);
+
+    ctr_block = #VPSHUFB_128(ctr_block, BSWAP_MASK);
+    ctr_block = #VPADD_4u32(ctr_block, ONE);
+
+    // Cycle through the complete blocks
+    while(len >= 16) {
+        // AES encryption (or decryption)
+        tmp = #VPSHUFB_128(ctr_block, BSWAP_MASK);
+        tmp = __aes_rounds(tmp, keys);
+        
+        // XOR plaintext with encryption (or decryption) state
+        tmp = #VPXOR_128(tmp, (u128) [input]);
+        (u128) [output] = tmp;
+        
+        // Increment counter
+        ctr_block = #VPADD_4u32(ctr_block, ONE);
+
+        len -= 16;
+        input += 16;
+        output += 16;
+    }
+
+    // Process the last incomplete block (if necessary)
+    if (len > 0) {
+        tmp = #VPSHUFB_128(ctr_block, BSWAP_MASK);
+        tmp = __aes_rounds(tmp, keys);
+
+        tmp = #VPXOR_128(tmp, (u128) [input]);
+        lbarr_s = __store(tmp, lbarr_s);
+        i = 0;
+        while(i < len) {
+            (u8) [output] = lbarr_s[(int) i];
+    
+            i += 1;
+            output += 1;
+        }
+    }
+    
+}

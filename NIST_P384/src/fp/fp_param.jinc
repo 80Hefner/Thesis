@@ -1,0 +1,52 @@
+/* prime NIST-P384 (P) */
+u64[NLIMBS] glob_p = {
+    0x00000000ffffffff,
+    0xffffffff00000000,
+    0xfffffffffffffffe,
+    0xffffffffffffffff,
+    0xffffffffffffffff,
+    0xffffffffffffffff
+};
+
+/* R - P = 2^(NLIMBS*64) - P */
+u64[NLIMBS] glob_mp = {
+    0xffffffff00000001,
+    0x00000000ffffffff,
+    0x0000000000000001,
+    0x0000000000000000,
+    0x0000000000000000,
+    0x0000000000000000
+};
+
+/* P - 2 */
+u64[NLIMBS] glob_pm2 = {
+    0x00000000fffffffd,
+    0xffffffff00000000,
+    0xfffffffffffffffe,
+    0xffffffffffffffff,
+    0xffffffffffffffff,
+    0xffffffffffffffff
+};
+
+/* (glob_p[0] * u0) mod 2^64 = -1 */
+u64 glob_u0 = 0x100000001;
+
+/* R mod P = 2^(NLIMBS*64) mod P */
+u64[NLIMBS] glob_oneM = {
+    0xffffffff00000001,
+    0x00000000ffffffff,
+    0x0000000000000001,
+    0x0000000000000000,
+    0x0000000000000000,
+    0x0000000000000000
+};
+
+/* R^2 mod P = 2^(2*NLIMBS*64) mod P */
+u64[NLIMBS] glob_rM = {
+    0xfffffffe00000001,
+    0x0000000200000000,
+    0xfffffffe00000000,
+    0x0000000200000000,
+    0x0000000000000001,
+    0x0000000000000000
+};

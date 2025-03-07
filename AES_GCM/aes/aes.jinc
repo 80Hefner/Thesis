@@ -1,0 +1,15 @@
+
+// Block cipher that uses AES keys aka Ek
+inline fn __aes_rounds(reg u128 init, stack u128[NKEYS] keys) -> reg u128
+{
+    inline int i;
+    reg u128 state;
+
+    state = #VPXOR_128(init, keys[0]);
+    for i=1 to ROUNDS {
+        state = #VAESENC(state, keys[i]);
+    }
+    state = #VAESENCLAST(state, keys[ROUNDS]);
+
+    return state;
+}

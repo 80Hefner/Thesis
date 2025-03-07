@@ -1,0 +1,49 @@
+
+inline fn __aes128_assist(reg u128 temp1 temp2, inline int ks_pointer, stack u128[NKEYS] key_schedule) -> reg u128, reg u128, stack u128[NKEYS]
+{
+    reg u128 temp3;
+    
+    temp2 = #VPSHUFD(temp2, 0xff);
+    temp3 = #VPSLLDQ(temp1, 0x4);
+    temp1 = #VPXOR_128(temp1, temp3);
+    temp3 = #VPSLLDQ(temp3, 0x4);
+    temp1 = #VPXOR_128(temp1, temp3);
+    temp3 = #VPSLLDQ(temp3, 0x4);
+    temp1 = #VPXOR_128(temp1, temp3);
+    temp1 = #VPXOR_128(temp1, temp2);
+
+    key_schedule[ks_pointer] = temp1;
+
+    return temp1, temp2, key_schedule;
+}
+
+inline fn __aes128_key_expansion(reg u64 user_key, stack u128[NKEYS] key_schedule) -> stack u128[NKEYS]
+{
+    reg u128 temp1, temp2;
+
+    temp1 = (u128) [user_key];
+    key_schedule[0] = temp1;
+
+    temp2 = #AESKEYGENASSIST(temp1, 0x1);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 1, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x2);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 2, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x4);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 3, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x8);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 4, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x10);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 5, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x20);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 6, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x40);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 7, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x80);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 8, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x1b);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 9, key_schedule);
+    temp2 = #AESKEYGENASSIST(temp1, 0x36);
+    temp1, temp2, key_schedule = __aes128_assist(temp1, temp2, 10, key_schedule);
+
+    return key_schedule;
+}
